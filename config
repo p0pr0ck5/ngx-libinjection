@@ -1,0 +1,58 @@
+if [ -z "$LIBINJECTION_PATH" ]; then
+    echo "$0: error: \$LIBINJECTION_PATH not defined"
+
+    exit 1
+fi
+
+
+ngx_feature="libinjection()"
+ngx_feature_name="libinjection"
+ngx_feature_run=yes
+ngx_feature_incs='
+#include <libinjection.h>
+#include <libinjection_sqli.h>
+'
+ngx_feature_path="$LIBINJECTION_PATH"
+ngx_feature_libs="-Wl,-rpath,$LIBINJECTION_PATH -L$LIBINJECTION_PATH -linjection"
+ngx_feature_test='
+struct libinjection_sqli_state state;
+int issqli;
+
+const char *input = "-1'"'"' and 1=1 union/* foo */select load_file('"'"'/etc/passwd'"'"')--";
+size_t slen = strlen(input);
+
+libinjection_sqli_init(&state, input, slen, FLAG_NONE);
+return !libinjection_is_sqli(&state);
+'
+
+
+. auto/feature
+
+
+if [ $ngx_found = no ]; then
+    echo "$0: error: ngx_http_libinjection_module requires libinjection at $LIBINJECTION_PATH"
+
+    exit 1 
+fi
+
+
+ngx_module_incs="$LIBINJECTION_PATH"
+ngx_module_libs="-Wl,-rpath,$LIBINJECTION_PATH -L$LIBINJECTION_PATH"
+
+
+if [ -n "$LIBINJECTION_STATIC" ]; then
+    echo " + linking libinjection statically"
+    ngx_module_libs="$ngx_module_libs -Wl,-Bstatic -linjection -Wl,-Bdynamic"
+else
+    echo " + linking libinjection dynamically"
+    ngx_module_libs="$ngx_module_libs -linjection"
+fi
+
+
+ngx_module_type=HTTP
+ngx_addon_name=ngx_http_libinjection_module
+HTTP_MODULES="$HTTP_MODULES ngx_http_libinjection_module"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_libinjection_module.c"
+
+
+. auto/module
