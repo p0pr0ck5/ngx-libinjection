@@ -4,14 +4,15 @@ ngx-libinjection
 
 # Description
 
-Simple module integrating [libinjection](https://github.com/client9/libinjection/) as a basic request filter. Configurable query parameters are evaluated against `libinjection`; requests containing param values flagged as potential SQL injection are rejected as forbidden.
+Simple module integrating [libinjection](https://github.com/client9/libinjection/) as a basic access phase handler. Defined query parameters are evaluated against `libinjection`; requests containing param values flagged as potential SQL injection are rejected as forbidden.
 
 # Installation
 
 `libinjection` must first be built and referenced by the environmental variable `LIBINJECTION_PATH`. Because both the source and object files in `libinjection` live in the projects `src` directory, it's easiest to just reference this sub directory:
 
 ```bash
-$ export LIBINJECTION_PATH=/home/poprocks/src/libinjection/src
+$ git clone https://github.com/client9/libinjection.git && cd libinjection && make all
+$ export LIBINJECTION_PATH=/path/to/libinjection/src
 ```
 
 And configure Nginx with this module as any other module:
@@ -33,7 +34,7 @@ $ export LIBINJECTION_STATIC=yes
 server {
     libinjection on;
     libinjection_keys foo;
-    libinjection_keys bar;
+    libinjection_keys bat;
 }
 ```
 
@@ -62,7 +63,7 @@ Enables processing of query string params with `libinjection`.
 
 ## libinjection_keys
 
-**Syntax**: *libinjection foo*
+**Syntax**: *libinjection_keys foo*
 
 **Default**: *-*
 
@@ -78,6 +79,7 @@ Defines one or more query string keys whose value will be passed to `libinjectio
 # LICENSE
 
 Copyright (c) 2018, Robert Paprocki
+
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
