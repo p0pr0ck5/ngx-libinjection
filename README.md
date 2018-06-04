@@ -33,13 +33,13 @@ $ export LIBINJECTION_STATIC=yes
 ```
 server {
     libinjection on;
-    libinjection_keys foo;
-    libinjection_keys bat;
+    libinjection_patterns foo;
+    libinjection_patterns ba?;
 }
 ```
 
 ```bash
-$ curl "localhost/index.html?foo=bar&bat=-1' and 1=1 union/* foo */select load_file('/etc/passwd')--"
+$ curl "localhost/index.html?foo=bar&bat=-1%27%20and%201%3D1%20union%2F*%20foo%20*%2Fselect%20load_file(%27%2Fetc%2Fpasswd%27)--%20"
 <html>
 <head><title>403 Forbidden</title></head>
 <body bgcolor="white">
@@ -61,7 +61,7 @@ $ curl "localhost/index.html?foo=bar&bat=-1' and 1=1 union/* foo */select load_f
 
 Enables processing of query string params with `libinjection`.
 
-## libinjection_keys
+## libinjection_patterns
 
 **Syntax**: *libinjection_keys foo*
 
@@ -69,11 +69,10 @@ Enables processing of query string params with `libinjection`.
 
 **Context**: *http, server, location*
 
-Defines one or more query string keys whose value will be passed to `libinjection`. Multiple keys can be defined with multiple directives.
+Defines a regular expression to search against the list of parameter keys in the query string. Matching keys will have their values passed to `libinjection`. Multiple patterns can be defined with multiple directives.
 
 # TODO
 
-* Support wildcard/regular expression key definitions
 * Support request body processing
 
 # LICENSE

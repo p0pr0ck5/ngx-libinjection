@@ -15,7 +15,7 @@ typedef struct libinjection_sqli_state libinjection_sqli_state_t;
 
 typedef struct {
     ngx_flag_t   enabled;
-    ngx_array_t  *keys;
+    ngx_array_t  *patterns;
 } ngx_http_libinjection_loc_conf_t;
 
 
@@ -28,6 +28,8 @@ typedef enum {
 } arg_parse_state_t;
 
 
+static char *
+ngx_http_libinjection_patterns(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_http_libinjection_postconfiguration(ngx_conf_t *cf);
 static void *ngx_http_libinjection_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_libinjection_merge_loc_conf(ngx_conf_t *cf,
@@ -46,11 +48,11 @@ static ngx_command_t ngx_http_libinjection_commands[] = {
         NULL
     },
     {
-        ngx_string("libinjection_keys"),
+        ngx_string("libinjection_patterns"),
         NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
-        ngx_conf_set_str_array_slot,
+        ngx_http_libinjection_patterns,
         NGX_HTTP_LOC_CONF_OFFSET,
-        offsetof(ngx_http_libinjection_loc_conf_t, keys),
+        0,
         NULL
     },
 
@@ -90,54 +92,71 @@ ngx_module_t  ngx_http_libinjection_module = {
 
 
 static ngx_str_t
-ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_str_t *key,
-                                 u_char **buf, ngx_uint_t *offset)
+ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_regex_t *re,
+                                 ngx_str_t *key, u_char **buf,
+                                 ngx_uint_t *offset)
 {
-    int                 i, found;
     u_char             *p, *q, *last, *src;
-    ngx_str_t           value, decoded, dummy;
+    ngx_int_t           n, found;
+    ngx_str_t           value, decoded;
     arg_parse_state_t   state;
 
-    i = found = 0;
+    found = 0;
 
-    value.data = dummy.data = NULL;
-    value.len = dummy.len = 0;
+    value.data = NULL;
+    value.len = 0;
     
     if (*offset >= r->args.len) {
-        return dummy;
+        return value;
     }
 
     p = q = r->args.data + *offset;
     last = r->args.data + r->args.len;
 
     state = SEARCHING;
-    
+
+
     while (p != last) {
-        switch (state) {
+        switch(state) {
         case SKIPPING:
             if (*p == '&') {
                 state = SEARCHING;
                 q = p + 1;
-                i = 0;
             }
 
             break;
 
         case SEARCHING:
-            if (*p != key->data[i]) {
+            /* key with no value */
+
+            if (*p == '&') {
                 state = SKIPPING;
-                break;
+
+                continue;
             }
 
-            /* match so far */
-            i++;
+            /* end key */
 
-            if ((size_t)(p - q) == key->len - 1) {
-                if (*(p + 1) == '=') {
+            if (*p == '=' && *(p + 1) != '&' ) {
+                key->len  = p - q;
+                key->data = q;
+
+                n = ngx_regex_exec(re, key, NULL, 0);
+
+                if (n >= 0) {
+                     /* key match, find the value */
+
                     state = KEY_FOUND;
 
-                } else {
+                    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                                   "http libinjection examine \"%V\"", key);
+                } else if (n == NGX_REGEX_NO_MATCHED) {
+                    /* no match, on to the next param */
+
                     state = SKIPPING;
+                } else {
+                    ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                                  ngx_regex_exec_n " failed: %i", n);
                 }
             }
 
@@ -145,6 +164,7 @@ ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_str_t *key,
 
         case KEY_FOUND:
             /* move past '=' */
+
             q = p + 1;
 
             p = q - 1;
@@ -154,6 +174,7 @@ ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_str_t *key,
             break;
 
         case GATHERING:
+
             if (*p == '&' || p + 1 == last) {
                 state = PRINTING;
                 continue;
@@ -182,7 +203,7 @@ ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_str_t *key,
     }
 
     if (!found) {
-        return dummy;
+        return value;
     }
 
     src = value.data;
@@ -201,14 +222,15 @@ static ngx_int_t
 ngx_http_libinjection_handler(ngx_http_request_t *r)
 {
     u_char                            *dst, *src;
-    ngx_str_t                          decoded, *key;
+    ngx_str_t                          decoded, key;
     ngx_uint_t                         i, offset;
+    ngx_regex_t                       *re;
     libinjection_sqli_state_t          state;
     ngx_http_libinjection_loc_conf_t  *ulcf;
 
     ulcf = ngx_http_get_module_loc_conf(r, ngx_http_libinjection_module);
 
-    if (!ulcf->enabled) {
+    if (!ulcf->enabled || ulcf->patterns == NGX_CONF_UNSET_PTR) {
         return NGX_DECLINED;
     }
 
@@ -218,11 +240,12 @@ ngx_http_libinjection_handler(ngx_http_request_t *r)
     dst = ngx_pnalloc(r->pool, r->args.len);
     src = dst;
 
-    key = ulcf->keys->elts;
+    re = ulcf->patterns->elts;
     i = offset = 0;
     
     for ( ;; ) {
-        decoded = ngx_http_libinjection_arg_search(r, &key[i], &dst, &offset);
+        decoded = ngx_http_libinjection_arg_search(r, &re[i], &key, &dst,
+                                                   &offset);
 
         if (decoded.len) {
             libinjection_sqli_init(&state, (const char *)decoded.data,
@@ -231,7 +254,7 @@ ngx_http_libinjection_handler(ngx_http_request_t *r)
             if (libinjection_is_sqli(&state)) {
                 ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
                               "injection found in param \"%V\": \"%s\"",
-                              &key[i], state.fingerprint);
+                              &key, state.fingerprint);
 
                 return NGX_HTTP_FORBIDDEN;
             }
@@ -240,7 +263,7 @@ ngx_http_libinjection_handler(ngx_http_request_t *r)
             /* next param */
             offset = 0;
 
-            if (++i >= ulcf->keys->nelts) {
+            if (++i >= ulcf->patterns->nelts) {
                 break;
             }
         }
@@ -249,6 +272,53 @@ ngx_http_libinjection_handler(ngx_http_request_t *r)
     }
 
     return NGX_DECLINED;
+}
+
+
+static char *
+ngx_http_libinjection_patterns(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_str_t            *value;
+    ngx_regex_t          *re, *entry;
+    ngx_regex_compile_t   rc;
+    u_char                errstr[NGX_MAX_CONF_ERRSTR];
+
+    ngx_http_libinjection_loc_conf_t *lcf = conf;
+
+    /* compile the expression */
+
+    value = cf->args->elts;
+    value++;
+
+    ngx_memzero(&rc, sizeof(ngx_regex_compile_t));
+
+    rc.pattern  = *value;
+    rc.pool     = cf->pool;
+    rc.err.len  = NGX_MAX_CONF_ERRSTR;
+    rc.err.data = errstr;
+
+    if (ngx_regex_compile(&rc) != NGX_OK) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "%V", &rc.err);
+        return NGX_CONF_ERROR;
+    }
+
+    re = rc.regex;
+
+    /* create the array if missing */
+
+    if (lcf->patterns == NGX_CONF_UNSET_PTR) {
+        lcf->patterns = ngx_array_create(cf->pool, 4, sizeof(ngx_regex_t));
+
+        if (lcf->patterns == NULL) {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    entry = ngx_array_push(lcf->patterns);
+
+    ngx_memcpy(entry, re, sizeof(ngx_regex_t));
+
+    return NGX_CONF_OK;
 }
 
 
@@ -281,8 +351,8 @@ ngx_http_libinjection_create_loc_conf(ngx_conf_t *cf)
         return NULL;
     }
 
-    lcf->enabled = NGX_CONF_UNSET;
-    lcf->keys = NGX_CONF_UNSET_PTR;
+    lcf->enabled  = NGX_CONF_UNSET;
+    lcf->patterns = NGX_CONF_UNSET_PTR;
 
     return lcf;
 }
@@ -296,6 +366,10 @@ ngx_http_libinjection_merge_loc_conf(ngx_conf_t *cf,
     ngx_http_libinjection_loc_conf_t *conf = child;
 
     ngx_conf_merge_off_value(conf->enabled, prev->enabled, 0);
+
+    if (conf->patterns == NGX_CONF_UNSET_PTR) {
+        conf->patterns = prev->patterns;
+    }
 
     return NGX_CONF_OK;
 }
