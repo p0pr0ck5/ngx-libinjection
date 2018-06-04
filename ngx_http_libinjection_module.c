@@ -363,10 +363,25 @@ ngx_http_libinjection_merge_loc_conf(ngx_conf_t *cf,
     ngx_http_libinjection_loc_conf_t *prev = parent;
     ngx_http_libinjection_loc_conf_t *conf = child;
 
+    ngx_uint_t    i;
+    ngx_regex_t  *re, *entry;
+
     ngx_conf_merge_off_value(conf->enabled, prev->enabled, 0);
 
     if (conf->patterns == NGX_CONF_UNSET_PTR) {
         conf->patterns = prev->patterns;
+    } else if (conf->patterns != NGX_CONF_UNSET_PTR &&
+               prev->patterns != NGX_CONF_UNSET_PTR) {
+        /* merge parent values into us  */
+
+        re = prev->patterns->elts;
+
+        /* TODO fix merge order */
+        for (i = 0; i < prev->patterns->nelts; i++) {
+            entry = ngx_array_push(conf->patterns);
+
+            ngx_memcpy(entry, &re[i], sizeof(ngx_regex_t));
+        }
     }
 
     return NGX_CONF_OK;
