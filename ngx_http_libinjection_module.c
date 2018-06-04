@@ -115,7 +115,6 @@ ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_regex_t *re,
 
     state = SEARCHING;
 
-
     while (p != last) {
         switch(state) {
         case SKIPPING:
@@ -174,7 +173,6 @@ ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_regex_t *re,
             break;
 
         case GATHERING:
-
             if (*p == '&' || p + 1 == last) {
                 state = PRINTING;
                 continue;
