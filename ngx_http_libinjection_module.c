@@ -126,17 +126,17 @@ ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_regex_t *re,
             break;
 
         case SEARCHING:
-            /* key with no value */
-
             if (*p == '&') {
+                /* key with no value */
+
                 state = SKIPPING;
 
                 continue;
             }
 
-            /* end key */
-
             if (*p == '=' && *(p + 1) != '&' ) {
+                /* end key */
+
                 key->len  = p - q;
                 key->data = q;
 
