@@ -14,7 +14,14 @@ typedef struct libinjection_sqli_state libinjection_sqli_state_t;
 
 
 typedef struct {
-    ngx_flag_t   enabled;
+    ngx_flag_t    done;
+    ngx_array_t  *patterns;
+} ngx_http_libinjection_ctx_t;
+
+
+typedef struct {
+    ngx_flag_t    enabled;
+    ngx_flag_t    body_enabled;
     ngx_array_t  *patterns;
 } ngx_http_libinjection_loc_conf_t;
 
@@ -28,13 +35,17 @@ typedef enum {
 } arg_parse_state_t;
 
 
-static char *
-ngx_http_libinjection_patterns(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char * ngx_http_libinjection_patterns(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static ngx_int_t ngx_http_libinjection_postconfiguration(ngx_conf_t *cf);
 static void *ngx_http_libinjection_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_libinjection_merge_loc_conf(ngx_conf_t *cf,
     void *parent, void *child);
+static ngx_int_t ngx_http_libinjection_process(ngx_http_request_t *r,
+    u_char *dst, ngx_array_t *patterns);
 static ngx_int_t ngx_http_libinjection_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_libinjection_body_handler(ngx_http_request_t *r);
+static void ngx_http_libinjection_body_post_handler(ngx_http_request_t *r);
 
 
 static ngx_command_t ngx_http_libinjection_commands[] = {
@@ -53,6 +64,14 @@ static ngx_command_t ngx_http_libinjection_commands[] = {
         ngx_http_libinjection_patterns,
         NGX_HTTP_LOC_CONF_OFFSET,
         0,
+        NULL
+    },
+    {
+        ngx_string("libinjection_body"),
+        NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+        ngx_conf_set_flag_slot,
+        NGX_HTTP_LOC_CONF_OFFSET,
+        offsetof(ngx_http_libinjection_loc_conf_t, body_enabled),
         NULL
     },
 
@@ -217,29 +236,18 @@ ngx_http_libinjection_arg_search(ngx_http_request_t *r, ngx_regex_t *re,
 
 
 static ngx_int_t
-ngx_http_libinjection_handler(ngx_http_request_t *r)
+ngx_http_libinjection_process(ngx_http_request_t *r, u_char *dst,
+                              ngx_array_t *patterns)
 {
-    u_char                            *dst, *src;
-    ngx_str_t                          decoded, key;
-    ngx_uint_t                         i, offset;
-    ngx_regex_t                       *re;
-    libinjection_sqli_state_t          state;
-    ngx_http_libinjection_loc_conf_t  *ulcf;
+    u_char                     *src;
+    ngx_str_t                   decoded, key;
+    ngx_uint_t                  i, offset;
+    ngx_regex_t                *re;
+    libinjection_sqli_state_t   state;
 
-    ulcf = ngx_http_get_module_loc_conf(r, ngx_http_libinjection_module);
-
-    if (!ulcf->enabled || ulcf->patterns == NGX_CONF_UNSET_PTR) {
-        return NGX_DECLINED;
-    }
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "http libinjection access handler");
-
-    dst = ngx_pnalloc(r->pool, r->args.len);
     src = dst;
-
-    re = ulcf->patterns->elts;
-    i = offset = 0;
+    re  = patterns;
+    i   = offset = 0;
     
     for ( ;; ) {
         decoded = ngx_http_libinjection_arg_search(r, &re[i], &key, &dst,
@@ -261,12 +269,192 @@ ngx_http_libinjection_handler(ngx_http_request_t *r)
             /* next param */
             offset = 0;
 
-            if (++i >= ulcf->patterns->nelts) {
+            if (++i >= patterns->nelts) {
                 break;
             }
         }
 
         dst = src;
+    }
+
+    return NGX_DECLINED;
+}
+
+
+static ngx_int_t
+ngx_http_libinjection_handler(ngx_http_request_t *r)
+{
+    u_char                            *dst, *src;
+    ngx_str_t                          decoded, key;
+    ngx_uint_t                         i, offset;
+    ngx_regex_t                       *re;
+    libinjection_sqli_state_t          state;
+    ngx_http_libinjection_loc_conf_t  *ulcf;
+
+    ulcf = ngx_http_get_module_loc_conf(r, ngx_http_libinjection_module);
+
+    if (!ulcf->enabled || ulcf->patterns == NGX_CONF_UNSET_PTR) {
+        return NGX_DECLINED;
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http libinjection query handler");
+
+    dst = ngx_pnalloc(r->pool, r->args.len);
+
+    return ngx_http_libinjection_process(r, dst, ulcf->patterns);
+}
+
+
+static void
+ngx_http_libinjection_body_post_handler(ngx_http_request_t *r)
+{
+    /* get the ctx from r, to get the patterns
+     * validate the body is in memory
+     * copy the data into a buf since we will be modifying
+     * then execute arg search as normal
+     * TODO
+     * handle unbuffered body read
+     */
+
+    u_char                       *dst, *src, *p;
+    ngx_str_t                     decoded, key;
+    ngx_int_t                     rc;
+    ngx_uint_t                    len;
+    ngx_chain_t                  *cl;
+    ngx_http_libinjection_ctx_t  *ctx;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http libinjection body post handler");
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_libinjection_module);
+    if (ctx == NULL) {
+        /* wat */
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+    }
+
+    rc = NGX_DECLINED;
+
+    if (r->request_body == NULL) {
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                      "no request body found");
+
+        goto done;
+    }
+
+    if (r->request_body->temp_file) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "request body buffered to disk, not processing");
+
+        goto done;
+    }
+
+    if (r->request_body->bufs == NULL) {
+        goto done;
+    }
+
+    /* copy the body bufs into a separate buf so we can decode it */
+
+    len = 0;
+    for (cl = r->request_body->bufs; cl; cl = cl->next) {
+        len += cl->buf->last - cl->buf->pos;
+    }
+
+    if (len == 0) {
+        goto done;
+    }
+
+    dst = ngx_palloc(r->pool, len);
+    if (dst == NULL) {
+        ngx_log_error(NGX_LOG_ERROR, r->connection->log, 0,
+                      "no memory to allocate libinjection request body buffer");
+
+        goto done;
+    }
+
+    p = buf;
+    for (cl = r->request_body->bufs; cl; cl = cl->next) {
+        p = ngx_copy(p, cl->buf->pos, cl->buf->last - cl->buf->pos);
+    }
+
+    rc = ngx_http_libinjection_process(r, buf, ctx->patterns);
+
+    if (rc != NGX_DECLINED) {
+
+    }
+
+done:
+
+#if defined(nginx_version) && nginx_version >= 8011
+    r->main->count--;
+#endif
+
+    if (!ctx->done) {
+        ctx->done = 1;
+
+        ngx_http_run_core_phases(r);
+    }
+}
+
+
+static ngx_int_t
+ngx_http_libinjection_body_handler(ngx_http_request_t *r)
+{
+    ngx_int_t                          rc;
+    ngx_http_libinjection_ctx_t       *ctx;
+    ngx_http_libinjection_loc_conf_t  *ulcf;
+
+    ulcf = ngx_http_get_module_loc_conf(r, ngx_http_libinjection_module);
+
+    if (!ulcf->body_enabled || ulcf->patterns == NGX_CONF_UNSET_PTR) {
+        return NGX_DECLINED;
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http libinjection body handler");
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_libinjection_module);
+
+    if (ctx == NULL) {
+        /* no ctx, first run, create the ctx and initialize .done */
+
+        ctx = ngx_palloc(r->pool, sizeof(ngx_http_libinjection_ctx_t));
+        if (ctx == NULL) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        ctx->done = 0;
+
+        /* TODO dont think copy is needed, but check */
+
+        ctx->patterns = ulcf->patterns;
+
+        ngx_http_set_module_ctx(r, ctx, ngx_http_libinjection_module);
+    }
+
+    if (!ctx->done) {
+        /* TODO really need to study these */
+        r->request_body_in_single_buf = 1;
+        r->request_body_in_persistent_file = 1;
+        r->request_body_in_clean_file = 1;
+
+        rc = ngx_http_read_request_body(r,
+            ngx_http_libinjection_body_post_handler);
+
+        if (rc == NGX_ERROR) {
+            return rc;
+        }
+
+        if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+#if (nginx_version < 1002006) ||                                              \
+        (nginx_version >= 1003000 && nginx_version < 1003009)
+            r->main->count--;
+#endif
+
+            return rc;
+        }
+
+        return NGX_DONE;
     }
 
     return NGX_DECLINED;
@@ -323,12 +511,21 @@ ngx_http_libinjection_patterns(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static ngx_int_t
 ngx_http_libinjection_postconfiguration(ngx_conf_t *cf)
 {
-    ngx_http_handler_pt        *h;
+    ngx_http_handler_pt        *h, *hb;
     ngx_http_core_main_conf_t  *cmcf;
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
-    h = ngx_array_push(&cmcf->phases[NGX_HTTP_ACCESS_PHASE].handlers);
+    /* modules are executed LIFO */
+
+    hb = ngx_array_push(&cmcf->phases[NGX_HTTP_PREACCESS_PHASE].handlers);
+    if (hb == NULL) {
+        return NGX_ERROR;
+    }
+
+    *hb = ngx_libinjection_body_handler;
+
+    h = ngx_array_push(&cmcf->phases[NGX_HTTP_PREACCESS_PHASE].handlers);
     if (h == NULL) {
         return NGX_ERROR;
     }   
@@ -349,8 +546,9 @@ ngx_http_libinjection_create_loc_conf(ngx_conf_t *cf)
         return NULL;
     }
 
-    lcf->enabled  = NGX_CONF_UNSET;
-    lcf->patterns = NGX_CONF_UNSET_PTR;
+    lcf->enabled      = NGX_CONF_UNSET;
+    lcf->body_enabled = NGX_CONF_UNSET;
+    lcf->patterns     = NGX_CONF_UNSET_PTR;
 
     return lcf;
 }
@@ -367,6 +565,7 @@ ngx_http_libinjection_merge_loc_conf(ngx_conf_t *cf,
     ngx_regex_t  *re, *entry;
 
     ngx_conf_merge_off_value(conf->enabled, prev->enabled, 0);
+    ngx_conf_merge_off_value(conf->body_enabled, prev->body_enabled, 0);
 
     if (conf->patterns == NGX_CONF_UNSET_PTR) {
         conf->patterns = prev->patterns;
