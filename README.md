@@ -61,6 +61,16 @@ $ curl "localhost/index.html?foo=bar&bat=-1%27%20and%201%3D1%20union%2F*%20foo%2
 
 Enables processing of query string params with `libinjection`.
 
+## libinjection_body
+
+**Syntax**: *libinjection_body on | off*
+
+**Default**: *libinjection_body off*
+
+**Context**: *http, server, location*
+
+Enables processing of request body params when the request content type is `application/x-www-form-urlencoded`. Note that the request body must be buffered into memory (see [client_body_buffer_size](http://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_buffer_size)).
+
 ## libinjection_patterns
 
 **Syntax**: *libinjection_keys foo*
@@ -73,7 +83,7 @@ Defines a regular expression to search against the list of parameter keys in the
 
 # TODO
 
-* Support request body processing
+* Refactor argument searching to improve on subquadratic performance.
 
 # LICENSE
 
