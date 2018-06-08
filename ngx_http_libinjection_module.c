@@ -419,6 +419,10 @@ ngx_http_libinjection_body_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
+    if (r->headers_in.content_type == NULL) {
+        return NGX_DECLINED;
+    }
+
     if (ngx_strcmp("application/x-www-form-urlencoded",
                    r->headers_in.content_type->value.data) != 0) {
         return NGX_DECLINED;
